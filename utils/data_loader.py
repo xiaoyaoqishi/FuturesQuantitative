@@ -1,0 +1,318 @@
+"""
+数据加载器模块
+
+支持从 CSV 文件加载历史数据，并转换为 Backtrader 格式
+"""
+
+import pandas as pd
+import backtrader as bt
+from typing import Optional, Union, Dict
+from pathlib import Path
+
+
+class DataLoader:
+    """
+    数据加载器类
+    
+    支持加载 CSV 格式的历史数据，要求包含以下列：
+    - date/datetime: 日期时间
+    - open: 开盘价
+    - high: 最高价
+    - low: 最低价
+    - close: 收盘价
+    - volume: 成交量
+    """
+    
+    @staticmethod
+    def load_from_csv(
+        filepath: Union[str, Path],
+        datetime_column: str = 'date',
+        date_format: Optional[str] = None
+    ) -> bt.feeds.PandasData:
+        """
+        从 CSV 文件加载数据
+        
+        Args:
+            filepath: CSV 文件路径
+            datetime_column: 日期时间列名
+            date_format: 日期格式（如果为 None，则自动推断）
+        
+        Returns:
+            Backtrader PandasData feed 对象
+        
+        Raises:
+            FileNotFoundError: 文件不存在
+            ValueError: 数据格式不正确
+        """
+        filepath = Path(filepath)
+        
+        if not filepath.exists():
+            raise FileNotFoundError(f'数据文件不存在: {filepath}')
+        
+        # 读取 CSV
+        df = pd.read_csv(filepath)
+        
+        # 确保日期列为 datetime 类型
+        if datetime_column not in df.columns:
+            raise ValueError(f'数据文件中未找到日期列: {datetime_column}')
+        
+        df[datetime_column] = pd.to_datetime(df[datetime_column], format=date_format)
+        df.set_index(datetime_column, inplace=True)
+        
+        # 检查必需的列
+        required_columns = ['open', 'high', 'low', 'close', 'volume']
+        missing_columns = [col for col in required_columns if col not in df.columns]
+        
+        if missing_columns:
+            raise ValueError(
+                f'数据文件缺少必需的列: {missing_columns}'
+            )
+        
+        # 确保数据类型正确
+        for col in required_columns:
+            df[col] = pd.to_numeric(df[col], errors='coerce')
+        
+        # 删除包含 NaN 的行
+        df.dropna(inplace=True)
+        
+        # 按日期排序
+        df.sort_index(inplace=True)
+        
+        # 创建 Backtrader feed
+        data = bt.feeds.PandasData(
+            dataname=df,
+            datetime=None,  # 使用索引作为日期
+            open='open',
+            high='high',
+            low='low',
+            close='close',
+            volume='volume',
+            openinterest=-1  # 如果没有持仓量数据，设为 -1
+        )
+        
+        return data
+    
+    @staticmethod
+    def create_sample_data(
+        output_path: Union[str, Path],
+        start_date: str = '2020-01-01',
+        end_date: str = '2023-12-31',
+        initial_price: float = 100.0
+    ) -> None:
+        """
+        创建示例数据文件（用于测试）
+        
+        Args:
+            output_path: 输出文件路径
+            start_date: 开始日期
+            end_date: 结束日期
+            initial_price: 初始价格
+        """
+        import numpy as np
+        
+        dates = pd.date_range(start=start_date, end=end_date, freq='D')
+        n_days = len(dates)
+        
+        # 生成模拟价格数据（随机游走）
+        np.random.seed(42)
+        returns = np.random.normal(0.001, 0.02, n_days)
+        prices = initial_price * np.exp(np.cumsum(returns))
+        
+        # 生成 OHLC 数据
+        data = []
+        for i, (date, price) in enumerate(zip(dates, prices)):
+            # 模拟日内波动
+            daily_volatility = np.random.uniform(0.01, 0.03)
+            high = price * (1 + daily_volatility)
+            low = price * (1 - daily_volatility)
+            open_price = prices[i-1] if i > 0 else price
+            close_price = price
+            
+            # 生成成交量（与价格波动相关）
+            volume = np.random.uniform(1000000, 5000000) * (1 + abs(returns[i]) * 10)
+            
+            data.append({
+                'date': date,
+                'open': round(open_price, 2),
+                'high': round(high, 2),
+                'low': round(low, 2),
+                'close': round(close_price, 2),
+                'volume': int(volume)
+            })
+        
+        df = pd.DataFrame(data)
+        df.to_csv(output_path, index=False)
+        print(f'示例数据已创建: {output_path}')
+
+
+def get_pandas_data(
+    filepath: Union[str, Path],
+    datetime_column: Optional[str] = None,
+    date_format: Optional[str] = None,
+    column_mapping: Optional[Dict[str, str]] = None
+) -> bt.feeds.PandasData:
+    """
+    读取期货数据 CSV 文件并返回 Backtrader PandasData feed
+    
+    支持灵活的列映射，自动识别常见的列名变体（如 Date/date/DATE, Open/open/OPEN 等）
+    
+    Args:
+        filepath: CSV 文件路径
+        datetime_column: 日期时间列名（如果为 None，则自动检测）
+        date_format: 日期格式字符串（如果为 None，则自动推断）
+        column_mapping: 自定义列映射字典，格式为 {'backtrader_column': 'csv_column'}
+                       例如: {'open': 'Open', 'high': 'High'}
+                       如果为 None，则使用默认映射或自动检测
+    
+    Returns:
+        Backtrader PandasData feed 对象
+    
+    Raises:
+        FileNotFoundError: 文件不存在
+        ValueError: 数据格式不正确或缺少必需的列
+    
+    Example:
+        >>> # 使用默认列名（Date, Open, High, Low, Close, Volume）
+        >>> data = get_pandas_data('data/futures.csv')
+        
+        >>> # 自定义列映射
+        >>> data = get_pandas_data(
+        ...     'data/futures.csv',
+        ...     column_mapping={'open': '开盘价', 'high': '最高价'}
+        ... )
+        
+        >>> # 指定日期列和格式
+        >>> data = get_pandas_data(
+        ...     'data/futures.csv',
+        ...     datetime_column='交易日期',
+        ...     date_format='%Y-%m-%d'
+        ... )
+    """
+    filepath = Path(filepath)
+    
+    if not filepath.exists():
+        raise FileNotFoundError(f'数据文件不存在: {filepath}')
+    
+    # 读取 CSV 文件
+    df = pd.read_csv(filepath)
+    
+    # 默认列映射（支持大小写变体）
+    default_mapping = {
+        'datetime': ['Date', 'date', 'DATE', 'DateTime', 'datetime', '时间', '日期'],
+        'open': ['Open', 'open', 'OPEN', '开盘', '开盘价'],
+        'high': ['High', 'high', 'HIGH', '最高', '最高价'],
+        'low': ['Low', 'low', 'LOW', '最低', '最低价'],
+        'close': ['Close', 'close', 'CLOSE', '收盘', '收盘价'],
+        'volume': ['Volume', 'volume', 'VOLUME', '成交量', 'Volume', 'Vol']
+    }
+    
+    # 如果提供了自定义映射，使用自定义映射；否则使用默认映射
+    if column_mapping is None:
+        column_mapping = {}
+        # 自动检测列名
+        for bt_col, possible_names in default_mapping.items():
+            for name in possible_names:
+                if name in df.columns:
+                    column_mapping[bt_col] = name
+                    break
+        
+        # 检查是否找到了所有必需的列
+        required_bt_cols = ['open', 'high', 'low', 'close', 'volume']
+        missing_cols = [col for col in required_bt_cols if col not in column_mapping]
+        if missing_cols:
+            raise ValueError(
+                f'无法找到以下必需的列: {missing_cols}\n'
+                f'可用列名: {list(df.columns)}\n'
+                f'请使用 column_mapping 参数指定列映射'
+            )
+    else:
+        # 验证自定义映射是否包含所有必需的列
+        required_bt_cols = ['open', 'high', 'low', 'close', 'volume']
+        missing_cols = [col for col in required_bt_cols if col not in column_mapping]
+        if missing_cols:
+            raise ValueError(
+                f'column_mapping 缺少以下必需的列: {missing_cols}'
+            )
+    
+    # 处理日期时间列
+    if datetime_column is None:
+        # 自动检测日期列
+        datetime_candidates = default_mapping['datetime']
+        datetime_column = None
+        for candidate in datetime_candidates:
+            if candidate in df.columns:
+                datetime_column = candidate
+                break
+        
+        if datetime_column is None:
+            # 检查是否在 column_mapping 中指定了 datetime
+            if 'datetime' in column_mapping:
+                datetime_column = column_mapping['datetime']
+            else:
+                raise ValueError(
+                    f'无法找到日期时间列\n'
+                    f'可用列名: {list(df.columns)}\n'
+                    f'请使用 datetime_column 参数指定日期列名'
+                )
+    
+    # 创建数据副本并重命名列为标准名称
+    df_processed = df.copy()
+    
+    # 重命名列
+    rename_dict = {}
+    for bt_col, csv_col in column_mapping.items():
+        if csv_col in df_processed.columns:
+            rename_dict[csv_col] = bt_col
+    
+    df_processed.rename(columns=rename_dict, inplace=True)
+    
+    # 处理日期时间列
+    if datetime_column in df_processed.columns:
+        # 如果日期列已经被重命名，使用新名称
+        dt_col = rename_dict.get(datetime_column, datetime_column)
+    else:
+        dt_col = datetime_column
+    
+    # 确保日期列为 datetime 类型
+    if dt_col not in df_processed.columns:
+        # 如果日期列没有被重命名，使用原始列名
+        dt_col = datetime_column
+    
+    if dt_col not in df_processed.columns:
+        raise ValueError(f'日期列 "{datetime_column}" 不存在于数据中')
+    
+    df_processed[dt_col] = pd.to_datetime(df_processed[dt_col], format=date_format, errors='coerce')
+    
+    # 设置日期为索引
+    df_processed.set_index(dt_col, inplace=True)
+    
+    # 确保数据类型正确
+    numeric_columns = ['open', 'high', 'low', 'close', 'volume']
+    for col in numeric_columns:
+        if col in df_processed.columns:
+            df_processed[col] = pd.to_numeric(df_processed[col], errors='coerce')
+    
+    # 删除包含 NaN 的行
+    df_processed.dropna(inplace=True)
+    
+    # 按日期排序
+    df_processed.sort_index(inplace=True)
+    
+    # 验证数据完整性
+    if len(df_processed) == 0:
+        raise ValueError('处理后的数据为空，请检查数据格式和列映射')
+    
+    # 创建 Backtrader PandasData feed
+    data = bt.feeds.PandasData(
+        dataname=df_processed,
+        datetime=None,  # 使用索引作为日期
+        open='open',
+        high='high',
+        low='low',
+        close='close',
+        volume='volume',
+        openinterest=-1  # 如果没有持仓量数据，设为 -1
+    )
+    
+    return data
+
