@@ -41,13 +41,14 @@ class TrendVolumeSniper(bt.Strategy):
     params = (
         ('trend_period', 60),
         ('vol_ma_period', 20),
-        ('vol_multiplier', 1.5),
+        ('vol_multiplier', 1.2),  # 降低限制，从1.5改为1.2
         ('atr_period', 14),
         ('stop_loss_atr_multiplier', 2.0),
         ('risk_per_trade', 0.02),
         ('breakout_period', 20),
         ('trailing_stop_atr_multiplier', 3.0),
         ('use_trailing_stop', True),
+        ('volatility_threshold', 0.002),  # NATR阈值，过滤"死"市场（0.2%）
         ('printlog', True),
     )
     
@@ -272,9 +273,10 @@ class TrendVolumeSniper(bt.Strategy):
         检查做多入场条件
         
         条件：
-        1. Close > Trend SMA
-        2. Close > Highest High of last 20 bars (突破)
-        3. Volume > Volume SMA * vol_multiplier
+        1. Close > Trend SMA (趋势确认)
+        2. Close > Highest High[-1] (突破前一个周期的最高价)
+        3. Volume > Volume SMA * vol_multiplier (最近3根K线中任意一根满足)
+        4. NATR > volatility_threshold (波动性过滤器，过滤"死"市场)
         
         Returns:
             bool: 是否满足做多入场条件
@@ -296,40 +298,50 @@ class TrendVolumeSniper(bt.Strategy):
         # 条件1：趋势条件 - 收盘价 > 趋势均线
         trend_condition = self.dataclose[0] > self.trend_ma[0]
         
-        # 条件2：突破条件 - 收盘价 > 最近N根K线的最高价
-        breakout_condition = self.dataclose[0] > self.highest_high[0]
+        # 条件2：突破条件 - 收盘价 > 最近N根K线的最高价（使用前一个周期的最高价）
+        breakout_condition = self.dataclose[0] > self.highest_high[-1]
         
-        # 条件3：成交量条件 - 最近3根K线的成交量都 > 成交量均线 * 倍数
+        # 条件3：成交量条件 - 最近3根K线中任意一根的成交量 > 成交量均线 * 倍数
         volume_threshold = self.volume_ma[0] * self.params.vol_multiplier
-        # 检查当前bar和前两个bar的成交量
+        # 检查当前bar和前两个bar的成交量（任意一根满足即可）
         if len(self.datavolume) < 3:
             volume_condition = self.datavolume[0] > volume_threshold
         else:
             volume_condition = (
-                self.datavolume[0] > volume_threshold and
-                self.datavolume[-1] > volume_threshold and
+                self.datavolume[0] > volume_threshold or
+                self.datavolume[-1] > volume_threshold or
                 self.datavolume[-2] > volume_threshold
             )
         
+        # 条件4：波动性过滤器 - NATR必须大于阈值（过滤"死"市场）
+        if self.dataclose[0] == 0:
+            volatility_condition = False
+        else:
+            natr = self.atr[0] / self.dataclose[0]  # 归一化ATR
+            volatility_condition = natr > self.params.volatility_threshold
+        
         # 调试信息：定期输出条件检查结果（每100个bar输出一次）
         if self.params.printlog and len(self.dataclose) % 100 == 0:
+            natr_val = (self.atr[0] / self.dataclose[0]) if self.dataclose[0] > 0 else 0
             self.log(
-                f'入场条件检查 | '
+                f'做多条件检查 | '
                 f'趋势: {trend_condition} ({self.dataclose[0]:.2f} vs {self.trend_ma[0]:.2f}) | '
-                f'突破: {breakout_condition} ({self.dataclose[0]:.2f} vs {self.highest_high[0]:.2f}) | '
-                f'成交量: {volume_condition} ({self.datavolume[0]:.0f} vs {volume_threshold:.0f})'
+                f'突破: {breakout_condition} ({self.dataclose[0]:.2f} vs {self.highest_high[-1]:.2f}) | '
+                f'成交量: {volume_condition} ({self.datavolume[0]:.0f} vs {volume_threshold:.0f}) | '
+                f'波动性: {volatility_condition} (NATR: {natr_val:.4f} vs {self.params.volatility_threshold:.4f})'
             )
         
-        return trend_condition and breakout_condition and volume_condition
+        return trend_condition and breakout_condition and volume_condition and volatility_condition
     
     def check_short_conditions(self) -> bool:
         """
         检查做空入场条件
         
         条件：
-        1. Close < Trend SMA (下跌趋势)
-        2. Close < Lowest Low of last 20 bars (支撑位突破)
-        3. Volume > Volume SMA * vol_multiplier (成交量确认)
+        1. Close < Trend SMA (下跌趋势确认)
+        2. Close < Lowest Low[-1] (突破前一个周期的最低价)
+        3. Volume > Volume SMA * vol_multiplier (最近3根K线中任意一根满足)
+        4. NATR > volatility_threshold (波动性过滤器，过滤"死"市场)
         
         Returns:
             bool: 是否满足做空入场条件
@@ -351,28 +363,37 @@ class TrendVolumeSniper(bt.Strategy):
         # 条件B：支撑位突破 - 收盘价 < 最近N根K线的最低价
         breakdown_condition = self.dataclose[0] < self.lowest_low[-1]
         
-        # 条件C：成交量条件 - 最近3根K线的成交量都 > 成交量均线 * 倍数
+        # 条件C：成交量条件 - 最近3根K线中任意一根的成交量 > 成交量均线 * 倍数
         volume_threshold = self.volume_ma[0] * self.params.vol_multiplier
-        # 检查当前bar和前两个bar的成交量
+        # 检查当前bar和前两个bar的成交量（任意一根满足即可）
         if len(self.datavolume) < 3:
             volume_condition = self.datavolume[0] > volume_threshold
         else:
             volume_condition = (
-                self.datavolume[0] > volume_threshold and
-                self.datavolume[-1] > volume_threshold and
+                self.datavolume[0] > volume_threshold or
+                self.datavolume[-1] > volume_threshold or
                 self.datavolume[-2] > volume_threshold
             )
         
+        # 条件D：波动性过滤器 - NATR必须大于阈值（过滤"死"市场）
+        if self.dataclose[0] == 0:
+            volatility_condition = False
+        else:
+            natr = self.atr[0] / self.dataclose[0]  # 归一化ATR
+            volatility_condition = natr > self.params.volatility_threshold
+        
         # 调试信息：定期输出条件检查结果（每100个bar输出一次）
         if self.params.printlog and len(self.dataclose) % 100 == 0:
+            natr_val = (self.atr[0] / self.dataclose[0]) if self.dataclose[0] > 0 else 0
             self.log(
                 f'做空条件检查 | '
                 f'趋势: {trend_condition} ({self.dataclose[0]:.2f} vs {self.trend_ma[0]:.2f}) | '
                 f'突破: {breakdown_condition} ({self.dataclose[0]:.2f} vs {self.lowest_low[-1]:.2f}) | '
-                f'成交量: {volume_condition} ({self.datavolume[0]:.0f} vs {volume_threshold:.0f})'
+                f'成交量: {volume_condition} ({self.datavolume[0]:.0f} vs {volume_threshold:.0f}) | '
+                f'波动性: {volatility_condition} (NATR: {natr_val:.4f} vs {self.params.volatility_threshold:.4f})'
             )
         
-        return trend_condition and breakdown_condition and volume_condition
+        return trend_condition and breakdown_condition and volume_condition and volatility_condition
     
     def update_trailing_stop(self) -> None:
         """
@@ -537,14 +558,14 @@ class TrendVolumeSniper(bt.Strategy):
                 size = self.calculate_position_size()
                 
                 if size > 0:
+                    natr_val = (self.atr[0] / self.dataclose[0]) if self.dataclose[0] > 0 else 0
+                    prev_high = self.highest_high[-1]
                     self.log(
-                        f'满足做多入场条件 | '
-                        f'收盘价: {self.dataclose[0]:.2f} | '
-                        f'趋势均线: {self.trend_ma[0]:.2f} | '
-                        f'最高价: {self.highest_high[0]:.2f} | '
-                        f'成交量: {self.datavolume[0]:.0f} | '
-                        f'成交量阈值: {self.volume_ma[0] * self.params.vol_multiplier:.0f} | '
-                        f'ATR: {self.atr[0]:.2f}'
+                        f'LONG ENTRY: 做多突破确认 | '
+                        f'价格突破: {self.dataclose[0]:.2f} > 前高 {prev_high:.2f} | '
+                        f'趋势确认: 价格 {self.dataclose[0]:.2f} > 均线 {self.trend_ma[0]:.2f} | '
+                        f'成交量确认: {self.datavolume[0]:.0f} (阈值: {self.volume_ma[0] * self.params.vol_multiplier:.0f}) | '
+                        f'波动性确认: NATR {natr_val:.4f} > {self.params.volatility_threshold:.4f}'
                     )
                     self.order = self.buy(size=size)
                     self.log(
@@ -560,14 +581,14 @@ class TrendVolumeSniper(bt.Strategy):
                 size = self.calculate_position_size()
                 
                 if size > 0:
+                    natr_val = (self.atr[0] / self.dataclose[0]) if self.dataclose[0] > 0 else 0
+                    prev_low = self.lowest_low[-1]
                     self.log(
-                        f'满足做空入场条件 | '
-                        f'收盘价: {self.dataclose[0]:.2f} | '
-                        f'趋势均线: {self.trend_ma[0]:.2f} | '
-                        f'最低价: {self.lowest_low[-1]:.2f} | '
-                        f'成交量: {self.datavolume[0]:.0f} | '
-                        f'成交量阈值: {self.volume_ma[0] * self.params.vol_multiplier:.0f} | '
-                        f'ATR: {self.atr[0]:.2f}'
+                        f'SHORT ENTRY: 做空突破确认 | '
+                        f'价格突破: {self.dataclose[0]:.2f} < 前低 {prev_low:.2f} | '
+                        f'趋势确认: 价格 {self.dataclose[0]:.2f} < 均线 {self.trend_ma[0]:.2f} | '
+                        f'成交量确认: {self.datavolume[0]:.0f} (阈值: {self.volume_ma[0] * self.params.vol_multiplier:.0f}) | '
+                        f'波动性确认: NATR {natr_val:.4f} > {self.params.volatility_threshold:.4f}'
                     )
                     self.order = self.sell(size=size)
                     self.log(
