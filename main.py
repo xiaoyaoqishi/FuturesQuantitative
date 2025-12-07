@@ -154,9 +154,9 @@ def run_backtest_for_symbol(
     # 添加策略
     cerebro.addstrategy(
         TrendVolumeSniper,
-        trend_period=60,
+        trend_period=35,
         vol_ma_period=20,
-        vol_multiplier=1.5,
+        vol_multiplier=1.2,
         atr_period=14,
         stop_loss_atr_multiplier=2.0,
         risk_per_trade=0.02,
